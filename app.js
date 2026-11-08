@@ -154,7 +154,7 @@ async function pageManualArea(areaId, featureId) {
       ["Depends on", f.depends_on.length ? f.depends_on.map(link).join(", ") : "—"],
       ["Needed by", feats.filter(x => x.depends_on.includes(f.id)).map(x => link(x.id)).join(", ") || "—"],
       ["Implemented by", Object.keys(f.implemented_by || {}).length ? impl(f.implemented_by) : "not built yet"],
-      ["Rules and settings", f.config ? esc(f.config) : "—"],
+      ["Rules and settings", f.config ? esc([].concat(f.config).join(", ")) : "—"],
       ["How to test", esc(f.test)]
     ];
     if (f.note) rows.push(["Note", esc(f.note)]);
