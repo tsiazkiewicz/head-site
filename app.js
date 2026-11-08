@@ -192,8 +192,26 @@ function dayLabel(ymd, today) {
   const [y, m, d] = ymd.split("-").map(Number), wd = DAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
   return `${ymd === today ? "Today" : ymd === addDays(today, 1) ? "Tomorrow" : wd}, ${wd.slice(0, 3)} ${d}.${String(m).padStart(2, "0")}`;
 }
+
+// ---------- projects ----------
+const PSTATE = { active: "Active", idea: "Idea", paused: "Paused", done: "Done" };
+const PORDER = { active: 0, idea: 1, paused: 2, done: 3 };
+async function loadProjects() { return ((await loadJson("data/projects.json", { projects: [] })).projects || []).slice().sort((a, b) => (PORDER[a.status] ?? 9) - (PORDER[b.status] ?? 9)); }
+function projectBlock(p, all) {
+  const steps = (p.next || []).slice(0, all ? 99 : 2);
+  return `<div class="row" style="align-items:flex-start"><div><strong>${esc(p.name)}</strong>${p.summary && all ? `<div class="muted" style="font-size:14px">${esc(p.summary)}</div>` : ""}
+    ${steps.length ? `<ul style="margin:6px 0 0 18px;padding:0">${steps.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : `<div class="muted" style="font-size:14px">No next step noted.</div>`}</div>
+    <span class="pill ${p.status === "active" ? "ok" : "none"}">${esc(PSTATE[p.status] || p.status)}</span></div>`;
+}
+async function pageProjects() {
+  const list = await loadProjects();
+  view.innerHTML = `<div class="label">Projects</div><h1>Projects</h1><div class="card">${list.length ? list.map(p => projectBlock(p, true)).join("") : `<p class="muted" style="margin:0">No projects yet.</p>`}</div>
+    <p class="muted" style="font-size:14px">To add or change a project, tell Claude. Data file: data/projects.json.</p>`;
+}
 async function pageDashboard() {
   const [{ areas, feats }, statusTxt, rec, one] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; }), loadJson("data/recurring.json", { rules: [] }), loadJson("data/events.json", { events: [] })]);
+  const projects = await loadProjects();
+  const trackerOn = feats.some(f => f.id === "project-tracker" && f.status === "live");
   const today = todayWarsaw(), rules = rec.rules || [], events = one.events || [];
   const agendaOn = feats.some(f => f.id === "agenda" && f.status === "live");
   const todayHtml = eventsOn(today, rules, events).map(evHtml).join("") || `<p class="muted" style="margin:0">Nothing planned.</p>`;
@@ -223,7 +241,7 @@ async function pageDashboard() {
       <div class="card"><div class="label">System status</div>${jobs.length ? jobs.map(row).join("") : soon("")}</div>
       <div class="card"><div class="label">Today’s agenda</div>${agendaOn ? `<div class="label" style="margin-bottom:4px">${esc(dayLabel(today, today))}</div>${todayHtml}` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Coming up (next six days)</div>${agendaOn ? weekHtml : soon("Planning area.")}</div>
-      <div class="card"><div class="label">Projects</div>${soon("Projects area.")}</div>
+      <div class="card"><div class="label">Projects</div>${trackerOn ? (projects.filter(p => p.status === "active").map(p => projectBlock(p, false)).join("") || `<p class="muted" style="margin:0">No active projects.</p>`) + `<p style="margin:10px 0 0"><a href="#/projects">All projects</a></p>` : soon("Projects area.")}</div>
       <div class="card"><div class="label">English report</div>${soon("Study area.")}</div>
     </div>`;
 }
@@ -251,6 +269,7 @@ async function route() {
   view.innerHTML = `<p class="muted">Loading…</p>`;
   try {
     if (parts[0] === "settings") pageSettings();
+    else if (parts[0] === "projects") await pageProjects();
     else if (parts[0] === "manual" && parts[1]) await pageManualArea(parts[1], parts[2]);
     else if (parts[0] === "manual") await pageManualOverview();
     else await pageDashboard();
