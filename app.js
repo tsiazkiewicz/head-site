@@ -208,9 +208,23 @@ async function pageProjects() {
   view.innerHTML = `<div class="label">Projects</div><h1>Projects</h1><div class="card">${list.length ? list.map(p => projectBlock(p, true)).join("") : `<p class="muted" style="margin:0">No projects yet.</p>`}</div>
     <p class="muted" style="font-size:14px">To add or change a project, tell Claude. Data file: data/projects.json.</p>`;
 }
+
+function reportHtml(r) {
+  if (!r) return `<p class="muted" style="margin:0">No report yet. The first one is written on a Sunday night.</p>`;
+  const trig = Object.entries(r.by_trigger || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(", ");
+  const line = (label, items) => items && items.length ? `<div style="margin-top:8px"><span class="muted">${label}</span> ${items.map(esc).join(", ")}</div>` : "";
+  const c = r.cards || {};
+  return `<div class="muted" style="font-size:14px">Week ending ${esc(r.week_ending)}</div>
+    <div style="margin-top:6px"><strong>${r.logged ?? 0}</strong> items logged${trig ? ` <span class="muted">(${trig})</span>` : ""}</div>
+    ${line("New words and phrases:", r.terms)}${line("Grammar concepts:", r.grammar_concepts)}${line("Came back:", r.came_back)}
+    <div class="muted" style="font-size:14px;margin-top:8px">Cards: ${c.made ?? 0} made, ${c.waiting ?? 0} waiting, ${c.needs_review ?? 0} need review</div>
+    ${r.summary ? `<p style="margin:10px 0 0">${esc(r.summary)}</p>` : ""}`;
+}
 async function pageDashboard() {
   const [{ areas, feats }, statusTxt, rec, one] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; }), loadJson("data/recurring.json", { rules: [] }), loadJson("data/events.json", { events: [] })]);
   const projects = await loadProjects();
+  const rep = await loadJson("data/english-report.json", null);
+  const repOn = feats.some(f => f.id === "english-report" && f.status === "live");
   const trackerOn = feats.some(f => f.id === "project-tracker" && f.status === "live");
   const today = todayWarsaw(), rules = rec.rules || [], events = one.events || [];
   const agendaOn = feats.some(f => f.id === "agenda" && f.status === "live");
@@ -242,7 +256,7 @@ async function pageDashboard() {
       <div class="card"><div class="label">Today’s agenda</div>${agendaOn ? `<div class="label" style="margin-bottom:4px">${esc(dayLabel(today, today))}</div>${todayHtml}` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Coming up (next six days)</div>${agendaOn ? weekHtml : soon("Planning area.")}</div>
       <div class="card"><div class="label">Projects</div>${trackerOn ? (projects.filter(p => p.status === "active").map(p => projectBlock(p, false)).join("") || `<p class="muted" style="margin:0">No active projects.</p>`) + `<p style="margin:10px 0 0"><a href="#/projects">All projects</a></p>` : soon("Projects area.")}</div>
-      <div class="card"><div class="label">English report</div>${soon("Study area.")}</div>
+      <div class="card"><div class="label">English report</div>${repOn ? reportHtml(rep) : soon("Study area.")}</div>
     </div>`;
 }
 function pageSettings() {
