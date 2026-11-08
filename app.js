@@ -18,9 +18,12 @@ async function gh(path, asJson) {
     cache: "no-store",
     headers: { Authorization: `Bearer ${token}`, Accept: asJson ? "application/vnd.github+json" : "application/vnd.github.raw+json" }
   });
-  if (r.status === 401 || r.status === 403) throw new Error("BAD_TOKEN");
-  if (r.status === 404) throw new Error("MISSING:" + path);
-  if (!r.ok) throw new Error("HTTP " + r.status);
+  if (!r.ok) {
+    let detail = ""; try { detail = (await r.json()).message || ""; } catch (e) { }
+    if (r.status === 401 || r.status === 403) throw new Error(`BAD_TOKEN|${r.status}|${detail}`);
+    if (r.status === 404) throw new Error(`MISSING|${path}|${detail}`);
+    throw new Error(`HTTP|${r.status}|${detail}`);
+  }
   return asJson ? r.json() : r.text();
 }
 async function loadRegistry() {
@@ -34,9 +37,11 @@ async function loadHistory() {
   try { return (await gh("history.jsonl")).split("\n").filter(Boolean).map(l => JSON.parse(l)); } catch (e) { return []; }
 }
 function problem(e) {
-  const m = String(e.message || e);
-  if (m === "NO_TOKEN") return `<div class="notice">No access token saved yet. Open <a href="#/settings">Settings</a> and paste your token.</div>`;
-  if (m === "BAD_TOKEN") return `<div class="notice err">GitHub refused the token. It may be expired or may not cover the head-data repository. Check it in <a href="#/settings">Settings</a>.</div>`;
+  const m = String(e.message || e), [code, a, b] = m.split("|");
+  if (code === "NO_TOKEN") return `<div class="notice">No access token saved yet. Open <a href="#/settings">Settings</a> and paste your token.</div>`;
+  if (code === "BAD_TOKEN") return `<div class="notice err">GitHub answered ${esc(a)}: ${esc(b || "no details")}.<br>The token may be expired, mistyped, or missing the Contents permission. Check it in <a href="#/settings">Settings</a>.</div>`;
+  if (code === "MISSING") return `<div class="notice err">GitHub could not find ${esc(a)}${b ? " (" + esc(b) + ")" : ""}. For a private repository this also happens when the token does not include head-data. Check the token\u2019s repository access.</div>`;
+  if (code === "HTTP") return `<div class="notice err">GitHub answered ${esc(a)}: ${esc(b || "no details")}.</div>`;
   return `<div class="notice err">Could not load data: ${esc(m)}</div>`;
 }
 
@@ -165,7 +170,7 @@ async function pageManualArea(areaId, featureId) {
   if (featureId) { const el = document.getElementById("f-" + featureId); if (el) el.scrollIntoView(); }
 }
 async function pageDashboard() {
-  const [{ areas, feats }, statusTxt] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING")) return "{}"; throw e; })]);
+  const [{ areas, feats }, statusTxt] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; })]);
   const status = (JSON.parse(statusTxt || "{}").jobs) || {};
   const jobs = feats.filter(f => f.kind === "nightly-job" || f.kind === "weekly-job").sort((a, b) => a.name.localeCompare(b.name));
   const now = Date.now();
