@@ -169,8 +169,36 @@ async function pageManualArea(areaId, featureId) {
     <h2>Features</h2>${mine.map(section).join("")}` : `<div class="notice">Nothing is defined for this area yet.</div>`}`;
   if (featureId) { const el = document.getElementById("f-" + featureId); if (el) el.scrollIntoView(); }
 }
+
+// ---------- agenda ----------
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function todayWarsaw() { return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Warsaw" }).format(new Date()); }
+function addDays(ymd, n) { const [y, m, d] = ymd.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); }
+function ruleHits(rule, ymd) {
+  const [y, m, d] = ymd.split("-").map(Number), wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  if (rule.type === "weekly") return wd === rule.weekday;
+  if (rule.type === "monthly-nth-weekday") return wd === rule.weekday && Math.ceil(d / 7) === rule.nth;
+  return false;
+}
+async function loadJson(path, fallback) {
+  try { return JSON.parse(await gh(path)); } catch (e) { if (String(e.message).startsWith("MISSING|")) return fallback; throw e; }
+}
+function eventsOn(ymd, rules, events) {
+  const list = [...rules.filter(r => ruleHits(r, ymd)), ...events.filter(e => e.date === ymd)];
+  return list.sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+}
+const evHtml = e => `<div class="row"><div>${e.time ? `<span class="muted">${esc(e.time)}</span> ` : ""}${esc(e.title)}${e.note ? `<div class="muted" style="font-size:13px">${esc(e.note)}</div>` : ""}</div></div>`;
+function dayLabel(ymd, today) {
+  const [y, m, d] = ymd.split("-").map(Number), wd = DAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  return `${ymd === today ? "Today" : ymd === addDays(today, 1) ? "Tomorrow" : wd}, ${wd.slice(0, 3)} ${d}.${String(m).padStart(2, "0")}`;
+}
 async function pageDashboard() {
-  const [{ areas, feats }, statusTxt] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; })]);
+  const [{ areas, feats }, statusTxt, rec, one] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; }), loadJson("data/recurring.json", { rules: [] }), loadJson("data/events.json", { events: [] })]);
+  const today = todayWarsaw(), rules = rec.rules || [], events = one.events || [];
+  const agendaOn = feats.some(f => f.id === "agenda" && f.status === "live");
+  const todayHtml = eventsOn(today, rules, events).map(evHtml).join("") || `<p class="muted" style="margin:0">Nothing planned.</p>`;
+  const weekHtml = [1, 2, 3, 4, 5, 6].map(n => addDays(today, n)).map(d => ({ d, list: eventsOn(d, rules, events) })).filter(x => x.list.length)
+    .map(x => `<div class="label" style="margin-top:12px">${esc(dayLabel(x.d, today))}</div>${x.list.map(evHtml).join("")}`).join("") || `<p class="muted" style="margin:0">Nothing planned for the next six days.</p>`;
   const status = (JSON.parse(statusTxt || "{}").jobs) || {};
   const jobs = feats.filter(f => f.kind === "nightly-job" || f.kind === "weekly-job").sort((a, b) => a.name.localeCompare(b.name));
   const now = Date.now();
@@ -193,8 +221,8 @@ async function pageDashboard() {
   view.innerHTML = `<div class="label">Dashboard</div><h1>Today</h1>
     <div class="grid">
       <div class="card"><div class="label">System status</div>${jobs.length ? jobs.map(row).join("") : soon("")}</div>
-      <div class="card"><div class="label">Today’s agenda</div>${soon("Planning area.")}</div>
-      <div class="card"><div class="label">Next seven days</div>${soon("Planning area.")}</div>
+      <div class="card"><div class="label">Today’s agenda</div>${agendaOn ? `<div class="label" style="margin-bottom:4px">${esc(dayLabel(today, today))}</div>${todayHtml}` : soon("Planning area.")}</div>
+      <div class="card"><div class="label">Coming up (next six days)</div>${agendaOn ? weekHtml : soon("Planning area.")}</div>
       <div class="card"><div class="label">Projects</div>${soon("Projects area.")}</div>
       <div class="card"><div class="label">English report</div>${soon("Study area.")}</div>
     </div>`;
