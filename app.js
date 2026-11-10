@@ -257,40 +257,45 @@ function wireTasks() {
   });
 }
 
-// ---------- notebook ----------
-const NB_KIND = { task: "Task", event: "Agenda", project: "Project", note: "Note" };
-async function pageNotebook() {
-  const [nb, feat] = await Promise.all([loadJson("data/notebook.json", { entries: [] }), gh("registry/features/notebook.json").then(JSON.parse).catch(() => null)]);
-  const on = feat && feat.status === "live";
-  const entries = (nb.entries || []).slice().sort((a, b) => b.created.localeCompare(a.created));
-  const when = iso => new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/Warsaw", dateStyle: "medium", timeStyle: "short" });
-  const item = e => {
-    const done = e.status === "processed";
-    const results = (e.items || []).map(i => `<div style="font-size:14px"><span class="pill none" style="margin-right:6px">${esc(NB_KIND[i.kind] || i.kind)}</span>${esc(i.summary)}</div>`).join("");
-    return `<div class="row" style="align-items:flex-start"><div style="min-width:0"><div class="muted" style="font-size:13px">${esc(when(e.created))}</div>
-      <div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(e.text)}</div>${results ? `<div style="margin-top:6px">${results}</div>` : ""}</div>
-      <div style="text-align:right"><span class="pill ${done ? "ok" : "stale"}">${done ? "Handled" : "Waiting"}</span>
-      ${done ? "" : `<div><a href="#" data-del="${esc(e.id)}" style="font-size:13px">Remove</a></div>`}</div></div>`;
+// ---------- tasks page: add, edit, delete, restore by hand ----------
+async function pageTasks(editId) {
+  const tasks = await loadTasks(), today = todayWarsaw();
+  const open = tasks.filter(t => !t.done).sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
+  const done = tasks.filter(t => t.done).sort((a, b) => (b.done_at || "").localeCompare(a.done_at || ""));
+  const field = (id, v, ph, type) => `<input type="${type || "text"}" id="${id}" value="${esc(v || "")}" placeholder="${esc(ph || "")}">`;
+  const row = t => {
+    if (t.id === editId) return `<div class="row" style="align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:220px;display:grid;gap:8px">
+      ${field("e-title", t.title, "Title")}${field("e-due", t.due, "", "date")}${field("e-note", t.note, "Note (optional)")}</div>
+      <div><button data-save="${esc(t.id)}">Save</button> <button class="sec" data-cancel>Cancel</button></div></div>`;
+    const late = !t.done && t.due && t.due < today;
+    return `<div class="row" style="align-items:flex-start"><label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;min-width:0">
+      <input type="checkbox" data-toggle="${esc(t.id)}" ${t.done ? "checked" : ""} style="margin-top:4px">
+      <span style="overflow-wrap:anywhere;${t.done ? "text-decoration:line-through;" : ""}">${esc(t.title)}${t.note ? `<div class="muted" style="font-size:13px">${esc(t.note)}</div>` : ""}</span></label>
+      <div style="text-align:right;white-space:nowrap">${t.due ? `<span class="pill ${late ? "fail" : "none"}">${esc(t.due)}</span> ` : ""}
+      <a href="#" data-edit="${esc(t.id)}" style="font-size:13px">Edit</a> <a href="#" data-del="${esc(t.id)}" style="font-size:13px">Delete</a></div></div>`;
   };
-  view.innerHTML = `<div class="label">Notebook</div><h1>Notebook</h1>
-    <p class="muted">Write anything. Claude reads new entries and turns each one into a task, an agenda event, an update of a project, or keeps it as a note. Your text is never changed or deleted.</p>
-    ${on ? "" : `<div class="notice">Handling of entries is not switched on yet. Notes you write now are kept and handled once it is.</div>`}
-    <div class="card"><textarea id="nbtext" rows="4" placeholder="What is on your mind?"></textarea>
-      <p style="margin:12px 0 0"><button id="nbadd">Add</button> <span class="muted" style="font-size:13px">Ctrl+Enter also adds.</span></p><div id="nbmsg"></div></div>
-    <div class="card">${entries.length ? entries.map(item).join("") : `<p class="muted" style="margin:0">Nothing written yet.</p>`}</div>`;
-  const add = async () => {
-    const t = document.getElementById("nbtext"), text = t.value.trim(); if (!text) return;
-    const btn = document.getElementById("nbadd"); btn.disabled = true;
-    try { await updateJson("data/notebook.json", { entries: [] }, d => { d.entries.push({ id: newId("n"), created: new Date().toISOString(), text, status: "new" }); }, "Notebook entry"); await pageNotebook(); }
-    catch (e) { btn.disabled = false; document.getElementById("nbmsg").innerHTML = problem(e); }
+  view.innerHTML = `<div class="label">Tasks</div><h1>Tasks</h1>
+    <div class="card"><div class="label">New task</div><div style="display:grid;gap:8px;max-width:520px">
+      ${field("n-title", "", "What needs doing?")}${field("n-due", "", "", "date")}${field("n-note", "", "Note (optional)")}</div>
+      <p style="margin:12px 0 0"><button id="addtask">Add</button></p><div id="tmsg"></div></div>
+    <div class="card"><div class="label">Open</div>${open.length ? open.map(row).join("") : `<p class="muted" style="margin:0">No open tasks.</p>`}</div>
+    ${done.length ? `<div class="card"><div class="label">Done</div>${done.map(row).join("")}</div>` : ""}`;
+  const fail = e => { document.getElementById("tmsg").innerHTML = problem(e); };
+  const save = (mutate, msg) => updateJson("data/tasks.json", { tasks: [] }, mutate, msg).then(() => pageTasks()).catch(fail);
+  const val = id => document.getElementById(id).value.trim();
+  document.getElementById("addtask").onclick = () => {
+    const title = val("n-title"); if (!title) return;
+    save(d => d.tasks.push({ id: newId("t"), title, due: val("n-due") || null, note: val("n-note"), done: false, created: new Date().toISOString() }), "Task added");
   };
-  document.getElementById("nbadd").onclick = add;
-  document.getElementById("nbtext").onkeydown = ev => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) add(); };
-  document.querySelectorAll("a[data-del]").forEach(a => a.onclick = async ev => {
-    ev.preventDefault();
-    try { await updateJson("data/notebook.json", { entries: [] }, d => { d.entries = d.entries.filter(x => !(x.id === a.dataset.del && x.status === "new")); }, "Notebook entry removed"); await pageNotebook(); }
-    catch (e) { document.getElementById("nbmsg").innerHTML = problem(e); }
+  document.getElementById("n-title").onkeydown = ev => { if (ev.key === "Enter") document.getElementById("addtask").click(); };
+  document.querySelectorAll("input[data-toggle]").forEach(b => b.onchange = () => save(d => { const t = d.tasks.find(x => x.id === b.dataset.toggle); if (t) { t.done = b.checked; if (b.checked) t.done_at = new Date().toISOString(); else delete t.done_at; } }, "Task toggled"));
+  document.querySelectorAll("a[data-edit]").forEach(a => a.onclick = ev => { ev.preventDefault(); pageTasks(a.dataset.edit); });
+  document.querySelectorAll("a[data-del]").forEach(a => a.onclick = ev => { ev.preventDefault(); const t = tasks.find(x => x.id === a.dataset.del); if (t && confirm(`Delete "${t.title}"?`)) save(d => { d.tasks = d.tasks.filter(x => x.id !== a.dataset.del); }, "Task deleted"); });
+  document.querySelectorAll("button[data-save]").forEach(b => b.onclick = () => {
+    const title = val("e-title"); if (!title) return;
+    save(d => { const t = d.tasks.find(x => x.id === b.dataset.save); if (t) { t.title = title; t.due = val("e-due") || null; t.note = val("e-note"); } }, "Task edited");
   });
+  document.querySelectorAll("button[data-cancel]").forEach(b => b.onclick = () => pageTasks());
 }
 
 function reportHtml(r) {
@@ -341,7 +346,7 @@ async function pageDashboard() {
       <div class="card"><div class="label">System status</div>${jobs.length ? jobs.map(row).join("") : soon("")}</div>
       <div class="card"><div class="label">Today’s agenda</div>${agendaOn ? `<div class="label" style="margin-bottom:4px">${esc(dayLabel(today, today))}</div>${todayHtml}` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Coming up (next six days)</div>${agendaOn ? weekHtml : soon("Planning area.")}</div>
-      <div class="card"><div class="label">Tasks</div>${tasksOn ? taskRows(tasks, today) + `<p style="margin:10px 0 0"><a href="#/notebook">Notebook</a></p>` : soon("Planning area.")}</div>
+      <div class="card"><div class="label">Tasks</div>${tasksOn ? taskRows(tasks, today) + `<p style="margin:10px 0 0"><a href="#/tasks">All tasks</a></p>` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Projects</div>${trackerOn ? (projects.filter(p => p.status === "active").map(p => projectBlock(p, false)).join("") || `<p class="muted" style="margin:0">No active projects.</p>`) + `<p style="margin:10px 0 0"><a href="#/projects">All projects</a></p>` : soon("Projects area.")}</div>
       <div class="card"><div class="label">English report</div>${repOn ? reportHtml(rep) : soon("Study area.")}</div>
     </div>`;
@@ -352,7 +357,7 @@ function pageSettings() {
   view.innerHTML = `<div class="label">Settings</div><h1>Access to your data</h1>
     <p class="muted">The page itself is public and holds no personal data. Your data sits in the private repository ${esc(DATA_REPO)} and is read with a token that stays in this browser only.</p>
     <div class="card"><div class="label">GitHub token</div>
-      <p class="muted">Create a fine-grained token on GitHub for the repository ${esc(DATA_REPO)} only, with the Contents permission and paste it here. <strong>Read only</strong> is enough to look at everything; the notebook and ticking off tasks need <strong>Read and write</strong>.</p>
+      <p class="muted">Create a fine-grained token on GitHub for the repository ${esc(DATA_REPO)} only, with the Contents permission and paste it here. <strong>Read only</strong> is enough to look at everything; adding, editing and ticking off tasks need <strong>Read and write</strong>.</p>
       <input type="password" id="tok" placeholder="${has ? "A token is saved. Paste a new one to replace it." : "Paste token"}" autocomplete="off">
       <p style="margin-top:14px"><button id="save">Save and test</button> <button class="sec" id="clear">Remove token</button></p>
       <div id="msg"></div></div>`;
@@ -372,7 +377,7 @@ async function route() {
   try {
     if (parts[0] === "settings") pageSettings();
     else if (parts[0] === "projects") await pageProjects();
-    else if (parts[0] === "notebook") await pageNotebook();
+    else if (parts[0] === "tasks") await pageTasks();
     else if (parts[0] === "manual" && parts[1]) await pageManualArea(parts[1], parts[2]);
     else if (parts[0] === "manual") await pageManualOverview();
     else await pageDashboard();
