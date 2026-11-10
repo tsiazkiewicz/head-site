@@ -36,38 +36,11 @@ async function loadRegistry() {
 async function loadHistory() {
   try { return (await gh("history.jsonl")).split("\n").filter(Boolean).map(l => JSON.parse(l)); } catch (e) { return []; }
 }
-
-// ---------- writing (needs a token with Contents: read and write) ----------
-const toB64 = s => { let bin = ""; new TextEncoder().encode(s).forEach(x => bin += String.fromCharCode(x)); return btoa(bin); };
-const fromB64 = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), c => c.charCodeAt(0)));
-// Reads a JSON file, lets `mutate` change it, writes it back. Retries when the file changed in between
-// (for example because the nightly job wrote to it at the same moment).
-async function updateJson(path, fallback, mutate, message) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    let sha, data;
-    try { const meta = await gh(path, true); sha = meta.sha; data = JSON.parse(fromB64(meta.content)); }
-    catch (e) { if (String(e.message).startsWith("MISSING|")) data = JSON.parse(JSON.stringify(fallback)); else throw e; }
-    mutate(data);
-    const r = await fetch(`https://api.github.com/repos/${OWNER}/${DATA_REPO}/contents/${path}`, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${getToken()}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
-      body: JSON.stringify({ message, content: toB64(JSON.stringify(data, null, 2) + "\n"), ...(sha ? { sha } : {}) })
-    });
-    if (r.ok) return data;
-    if (r.status === 409 || r.status === 422) continue;
-    let detail = ""; try { detail = (await r.json()).message || ""; } catch (e) { }
-    if (r.status === 401 || r.status === 403 || r.status === 404) throw new Error(`NO_WRITE|${r.status}|${detail}`);
-    throw new Error(`HTTP|${r.status}|${detail}`);
-  }
-  throw new Error("HTTP|409|The file kept changing; try again in a moment.");
-}
-const newId = p => p + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 function problem(e) {
   const m = String(e.message || e), [code, a, b] = m.split("|");
   if (code === "NO_TOKEN") return `<div class="notice">No access token saved yet. Open <a href="#/settings">Settings</a> and paste your token.</div>`;
   if (code === "BAD_TOKEN") return `<div class="notice err">GitHub answered ${esc(a)}: ${esc(b || "no details")}.<br>The token may be expired, mistyped, or missing the Contents permission. Check it in <a href="#/settings">Settings</a>.</div>`;
   if (code === "MISSING") return `<div class="notice err">GitHub could not find ${esc(a)}${b ? " (" + esc(b) + ")" : ""}. For a private repository this also happens when the token does not include head-data. Check the token\u2019s repository access.</div>`;
-  if (code === "NO_WRITE") return `<div class="notice err">GitHub refused the change (${esc(a)}${b ? ": " + esc(b) : ""}). Saving needs a token with Contents set to <strong>Read and write</strong> for ${esc(DATA_REPO)}. Replace it in <a href="#/settings">Settings</a>.</div>`;
   if (code === "HTTP") return `<div class="notice err">GitHub answered ${esc(a)}: ${esc(b || "no details")}.</div>`;
   return `<div class="notice err">Could not load data: ${esc(m)}</div>`;
 }
@@ -236,68 +209,6 @@ async function pageProjects() {
     <p class="muted" style="font-size:14px">To add or change a project, tell Claude. Data file: data/projects.json.</p>`;
 }
 
-
-// ---------- tasks ----------
-async function loadTasks() { return ((await loadJson("data/tasks.json", { tasks: [] })).tasks || []); }
-function taskRows(tasks, today) {
-  const open = tasks.filter(t => !t.done).sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
-  if (!open.length) return `<p class="muted" style="margin:0">No open tasks.</p>`;
-  return open.slice(0, 10).map(t => {
-    const late = t.due && t.due < today;
-    return `<div class="row"><label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer"><input type="checkbox" data-task="${esc(t.id)}" style="margin-top:4px">
-      <span>${esc(t.title)}${t.note ? `<div class="muted" style="font-size:13px">${esc(t.note)}</div>` : ""}</span></label>
-      ${t.due ? `<span class="pill ${late ? "fail" : "none"}">${esc(t.due)}</span>` : ""}</div>`;
-  }).join("") + (open.length > 10 ? `<p class="muted" style="margin:10px 0 0;font-size:14px">${open.length - 10} more.</p>` : "");
-}
-function wireTasks() {
-  document.querySelectorAll("input[data-task]").forEach(box => box.onchange = async () => {
-    box.disabled = true;
-    try { await updateJson("data/tasks.json", { tasks: [] }, d => { const t = d.tasks.find(x => x.id === box.dataset.task); if (t) { t.done = true; t.done_at = new Date().toISOString(); } }, "Task done (dashboard)"); route(); }
-    catch (e) { box.checked = false; box.disabled = false; view.insertAdjacentHTML("afterbegin", problem(e)); }
-  });
-}
-
-// ---------- tasks page: add, edit, delete, restore by hand ----------
-async function pageTasks(editId) {
-  const tasks = await loadTasks(), today = todayWarsaw();
-  const open = tasks.filter(t => !t.done).sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
-  const done = tasks.filter(t => t.done).sort((a, b) => (b.done_at || "").localeCompare(a.done_at || ""));
-  const field = (id, v, ph, type) => `<input type="${type || "text"}" id="${id}" value="${esc(v || "")}" placeholder="${esc(ph || "")}">`;
-  const row = t => {
-    if (t.id === editId) return `<div class="row" style="align-items:flex-start;flex-wrap:wrap"><div style="flex:1;min-width:220px;display:grid;gap:8px">
-      ${field("e-title", t.title, "Title")}${field("e-due", t.due, "", "date")}${field("e-note", t.note, "Note (optional)")}</div>
-      <div><button data-save="${esc(t.id)}">Save</button> <button class="sec" data-cancel>Cancel</button></div></div>`;
-    const late = !t.done && t.due && t.due < today;
-    return `<div class="row" style="align-items:flex-start"><label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;min-width:0">
-      <input type="checkbox" data-toggle="${esc(t.id)}" ${t.done ? "checked" : ""} style="margin-top:4px">
-      <span style="overflow-wrap:anywhere;${t.done ? "text-decoration:line-through;" : ""}">${esc(t.title)}${t.note ? `<div class="muted" style="font-size:13px">${esc(t.note)}</div>` : ""}</span></label>
-      <div style="text-align:right;white-space:nowrap">${t.due ? `<span class="pill ${late ? "fail" : "none"}">${esc(t.due)}</span> ` : ""}
-      <a href="#" data-edit="${esc(t.id)}" style="font-size:13px">Edit</a> <a href="#" data-del="${esc(t.id)}" style="font-size:13px">Delete</a></div></div>`;
-  };
-  view.innerHTML = `<div class="label">Tasks</div><h1>Tasks</h1>
-    <div class="card"><div class="label">New task</div><div style="display:grid;gap:8px;max-width:520px">
-      ${field("n-title", "", "What needs doing?")}${field("n-due", "", "", "date")}${field("n-note", "", "Note (optional)")}</div>
-      <p style="margin:12px 0 0"><button id="addtask">Add</button></p><div id="tmsg"></div></div>
-    <div class="card"><div class="label">Open</div>${open.length ? open.map(row).join("") : `<p class="muted" style="margin:0">No open tasks.</p>`}</div>
-    ${done.length ? `<div class="card"><div class="label">Done</div>${done.map(row).join("")}</div>` : ""}`;
-  const fail = e => { document.getElementById("tmsg").innerHTML = problem(e); };
-  const save = (mutate, msg) => updateJson("data/tasks.json", { tasks: [] }, mutate, msg).then(() => pageTasks()).catch(fail);
-  const val = id => document.getElementById(id).value.trim();
-  document.getElementById("addtask").onclick = () => {
-    const title = val("n-title"); if (!title) return;
-    save(d => d.tasks.push({ id: newId("t"), title, due: val("n-due") || null, note: val("n-note"), done: false, created: new Date().toISOString() }), "Task added");
-  };
-  document.getElementById("n-title").onkeydown = ev => { if (ev.key === "Enter") document.getElementById("addtask").click(); };
-  document.querySelectorAll("input[data-toggle]").forEach(b => b.onchange = () => save(d => { const t = d.tasks.find(x => x.id === b.dataset.toggle); if (t) { t.done = b.checked; if (b.checked) t.done_at = new Date().toISOString(); else delete t.done_at; } }, "Task toggled"));
-  document.querySelectorAll("a[data-edit]").forEach(a => a.onclick = ev => { ev.preventDefault(); pageTasks(a.dataset.edit); });
-  document.querySelectorAll("a[data-del]").forEach(a => a.onclick = ev => { ev.preventDefault(); const t = tasks.find(x => x.id === a.dataset.del); if (t && confirm(`Delete "${t.title}"?`)) save(d => { d.tasks = d.tasks.filter(x => x.id !== a.dataset.del); }, "Task deleted"); });
-  document.querySelectorAll("button[data-save]").forEach(b => b.onclick = () => {
-    const title = val("e-title"); if (!title) return;
-    save(d => { const t = d.tasks.find(x => x.id === b.dataset.save); if (t) { t.title = title; t.due = val("e-due") || null; t.note = val("e-note"); } }, "Task edited");
-  });
-  document.querySelectorAll("button[data-cancel]").forEach(b => b.onclick = () => pageTasks());
-}
-
 function reportHtml(r) {
   if (!r) return `<p class="muted" style="margin:0">No report yet. The first one is written on a Sunday night.</p>`;
   const trig = Object.entries(r.by_trigger || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(", ");
@@ -313,8 +224,6 @@ async function pageDashboard() {
   const [{ areas, feats }, statusTxt, rec, one] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; }), loadJson("data/recurring.json", { rules: [] }), loadJson("data/events.json", { events: [] })]);
   const projects = await loadProjects();
   const rep = await loadJson("data/english-report.json", null);
-  const tasksOn = feats.some(f => f.id === "tasks" && f.status === "live");
-  const tasks = tasksOn ? await loadTasks() : [];
   const repOn = feats.some(f => f.id === "english-report" && f.status === "live");
   const trackerOn = feats.some(f => f.id === "project-tracker" && f.status === "live");
   const today = todayWarsaw(), rules = rec.rules || [], events = one.events || [];
@@ -346,18 +255,16 @@ async function pageDashboard() {
       <div class="card"><div class="label">System status</div>${jobs.length ? jobs.map(row).join("") : soon("")}</div>
       <div class="card"><div class="label">Today’s agenda</div>${agendaOn ? `<div class="label" style="margin-bottom:4px">${esc(dayLabel(today, today))}</div>${todayHtml}` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Coming up (next six days)</div>${agendaOn ? weekHtml : soon("Planning area.")}</div>
-      <div class="card"><div class="label">Tasks</div>${tasksOn ? taskRows(tasks, today) + `<p style="margin:10px 0 0"><a href="#/tasks">All tasks</a></p>` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Projects</div>${trackerOn ? (projects.filter(p => p.status === "active").map(p => projectBlock(p, false)).join("") || `<p class="muted" style="margin:0">No active projects.</p>`) + `<p style="margin:10px 0 0"><a href="#/projects">All projects</a></p>` : soon("Projects area.")}</div>
       <div class="card"><div class="label">English report</div>${repOn ? reportHtml(rep) : soon("Study area.")}</div>
     </div>`;
-  wireTasks();
 }
 function pageSettings() {
   const has = !!getToken();
   view.innerHTML = `<div class="label">Settings</div><h1>Access to your data</h1>
     <p class="muted">The page itself is public and holds no personal data. Your data sits in the private repository ${esc(DATA_REPO)} and is read with a token that stays in this browser only.</p>
     <div class="card"><div class="label">GitHub token</div>
-      <p class="muted">Create a fine-grained token on GitHub for the repository ${esc(DATA_REPO)} only, with the Contents permission and paste it here. <strong>Read only</strong> is enough to look at everything; adding, editing and ticking off tasks need <strong>Read and write</strong>.</p>
+      <p class="muted">Create a fine-grained token on GitHub for the repository ${esc(DATA_REPO)} only, with the Contents permission (read is enough for now), and paste it here.</p>
       <input type="password" id="tok" placeholder="${has ? "A token is saved. Paste a new one to replace it." : "Paste token"}" autocomplete="off">
       <p style="margin-top:14px"><button id="save">Save and test</button> <button class="sec" id="clear">Remove token</button></p>
       <div id="msg"></div></div>`;
@@ -377,7 +284,6 @@ async function route() {
   try {
     if (parts[0] === "settings") pageSettings();
     else if (parts[0] === "projects") await pageProjects();
-    else if (parts[0] === "tasks") await pageTasks();
     else if (parts[0] === "manual" && parts[1]) await pageManualArea(parts[1], parts[2]);
     else if (parts[0] === "manual") await pageManualOverview();
     else await pageDashboard();
