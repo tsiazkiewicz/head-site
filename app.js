@@ -36,11 +36,38 @@ async function loadRegistry() {
 async function loadHistory() {
   try { return (await gh("history.jsonl")).split("\n").filter(Boolean).map(l => JSON.parse(l)); } catch (e) { return []; }
 }
+
+// ---------- writing (needs a token with Contents: read and write) ----------
+const toB64 = s => { let bin = ""; new TextEncoder().encode(s).forEach(x => bin += String.fromCharCode(x)); return btoa(bin); };
+const fromB64 = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), c => c.charCodeAt(0)));
+// Reads a JSON file, lets `mutate` change it, writes it back. Retries when the file changed in between
+// (for example because the nightly job wrote to it at the same moment).
+async function updateJson(path, fallback, mutate, message) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let sha, data;
+    try { const meta = await gh(path, true); sha = meta.sha; data = JSON.parse(fromB64(meta.content)); }
+    catch (e) { if (String(e.message).startsWith("MISSING|")) data = JSON.parse(JSON.stringify(fallback)); else throw e; }
+    mutate(data);
+    const r = await fetch(`https://api.github.com/repos/${OWNER}/${DATA_REPO}/contents/${path}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${getToken()}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+      body: JSON.stringify({ message, content: toB64(JSON.stringify(data, null, 2) + "\n"), ...(sha ? { sha } : {}) })
+    });
+    if (r.ok) return data;
+    if (r.status === 409 || r.status === 422) continue;
+    let detail = ""; try { detail = (await r.json()).message || ""; } catch (e) { }
+    if (r.status === 401 || r.status === 403 || r.status === 404) throw new Error(`NO_WRITE|${r.status}|${detail}`);
+    throw new Error(`HTTP|${r.status}|${detail}`);
+  }
+  throw new Error("HTTP|409|The file kept changing; try again in a moment.");
+}
+const newId = p => p + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 function problem(e) {
   const m = String(e.message || e), [code, a, b] = m.split("|");
   if (code === "NO_TOKEN") return `<div class="notice">No access token saved yet. Open <a href="#/settings">Settings</a> and paste your token.</div>`;
   if (code === "BAD_TOKEN") return `<div class="notice err">GitHub answered ${esc(a)}: ${esc(b || "no details")}.<br>The token may be expired, mistyped, or missing the Contents permission. Check it in <a href="#/settings">Settings</a>.</div>`;
   if (code === "MISSING") return `<div class="notice err">GitHub could not find ${esc(a)}${b ? " (" + esc(b) + ")" : ""}. For a private repository this also happens when the token does not include head-data. Check the token\u2019s repository access.</div>`;
+  if (code === "NO_WRITE") return `<div class="notice err">GitHub refused the change (${esc(a)}${b ? ": " + esc(b) : ""}). Saving needs a token with Contents set to <strong>Read and write</strong> for ${esc(DATA_REPO)}. Replace it in <a href="#/settings">Settings</a>.</div>`;
   if (code === "HTTP") return `<div class="notice err">GitHub answered ${esc(a)}: ${esc(b || "no details")}.</div>`;
   return `<div class="notice err">Could not load data: ${esc(m)}</div>`;
 }
@@ -209,6 +236,63 @@ async function pageProjects() {
     <p class="muted" style="font-size:14px">To add or change a project, tell Claude. Data file: data/projects.json.</p>`;
 }
 
+
+// ---------- tasks ----------
+async function loadTasks() { return ((await loadJson("data/tasks.json", { tasks: [] })).tasks || []); }
+function taskRows(tasks, today) {
+  const open = tasks.filter(t => !t.done).sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
+  if (!open.length) return `<p class="muted" style="margin:0">No open tasks.</p>`;
+  return open.slice(0, 10).map(t => {
+    const late = t.due && t.due < today;
+    return `<div class="row"><label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer"><input type="checkbox" data-task="${esc(t.id)}" style="margin-top:4px">
+      <span>${esc(t.title)}${t.note ? `<div class="muted" style="font-size:13px">${esc(t.note)}</div>` : ""}</span></label>
+      ${t.due ? `<span class="pill ${late ? "fail" : "none"}">${esc(t.due)}</span>` : ""}</div>`;
+  }).join("") + (open.length > 10 ? `<p class="muted" style="margin:10px 0 0;font-size:14px">${open.length - 10} more.</p>` : "");
+}
+function wireTasks() {
+  document.querySelectorAll("input[data-task]").forEach(box => box.onchange = async () => {
+    box.disabled = true;
+    try { await updateJson("data/tasks.json", { tasks: [] }, d => { const t = d.tasks.find(x => x.id === box.dataset.task); if (t) { t.done = true; t.done_at = new Date().toISOString(); } }, "Task done (dashboard)"); route(); }
+    catch (e) { box.checked = false; box.disabled = false; view.insertAdjacentHTML("afterbegin", problem(e)); }
+  });
+}
+
+// ---------- notebook ----------
+const NB_KIND = { task: "Task", event: "Agenda", project: "Project", note: "Note" };
+async function pageNotebook() {
+  const [nb, feat] = await Promise.all([loadJson("data/notebook.json", { entries: [] }), gh("registry/features/notebook.json").then(JSON.parse).catch(() => null)]);
+  const on = feat && feat.status === "live";
+  const entries = (nb.entries || []).slice().sort((a, b) => b.created.localeCompare(a.created));
+  const when = iso => new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/Warsaw", dateStyle: "medium", timeStyle: "short" });
+  const item = e => {
+    const done = e.status === "processed";
+    const results = (e.items || []).map(i => `<div style="font-size:14px"><span class="pill none" style="margin-right:6px">${esc(NB_KIND[i.kind] || i.kind)}</span>${esc(i.summary)}</div>`).join("");
+    return `<div class="row" style="align-items:flex-start"><div style="min-width:0"><div class="muted" style="font-size:13px">${esc(when(e.created))}</div>
+      <div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(e.text)}</div>${results ? `<div style="margin-top:6px">${results}</div>` : ""}</div>
+      <div style="text-align:right"><span class="pill ${done ? "ok" : "stale"}">${done ? "Handled" : "Waiting"}</span>
+      ${done ? "" : `<div><a href="#" data-del="${esc(e.id)}" style="font-size:13px">Remove</a></div>`}</div></div>`;
+  };
+  view.innerHTML = `<div class="label">Notebook</div><h1>Notebook</h1>
+    <p class="muted">Write anything. Claude reads new entries and turns each one into a task, an agenda event, an update of a project, or keeps it as a note. Your text is never changed or deleted.</p>
+    ${on ? "" : `<div class="notice">Handling of entries is not switched on yet. Notes you write now are kept and handled once it is.</div>`}
+    <div class="card"><textarea id="nbtext" rows="4" placeholder="What is on your mind?"></textarea>
+      <p style="margin:12px 0 0"><button id="nbadd">Add</button> <span class="muted" style="font-size:13px">Ctrl+Enter also adds.</span></p><div id="nbmsg"></div></div>
+    <div class="card">${entries.length ? entries.map(item).join("") : `<p class="muted" style="margin:0">Nothing written yet.</p>`}</div>`;
+  const add = async () => {
+    const t = document.getElementById("nbtext"), text = t.value.trim(); if (!text) return;
+    const btn = document.getElementById("nbadd"); btn.disabled = true;
+    try { await updateJson("data/notebook.json", { entries: [] }, d => { d.entries.push({ id: newId("n"), created: new Date().toISOString(), text, status: "new" }); }, "Notebook entry"); await pageNotebook(); }
+    catch (e) { btn.disabled = false; document.getElementById("nbmsg").innerHTML = problem(e); }
+  };
+  document.getElementById("nbadd").onclick = add;
+  document.getElementById("nbtext").onkeydown = ev => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) add(); };
+  document.querySelectorAll("a[data-del]").forEach(a => a.onclick = async ev => {
+    ev.preventDefault();
+    try { await updateJson("data/notebook.json", { entries: [] }, d => { d.entries = d.entries.filter(x => !(x.id === a.dataset.del && x.status === "new")); }, "Notebook entry removed"); await pageNotebook(); }
+    catch (e) { document.getElementById("nbmsg").innerHTML = problem(e); }
+  });
+}
+
 function reportHtml(r) {
   if (!r) return `<p class="muted" style="margin:0">No report yet. The first one is written on a Sunday night.</p>`;
   const trig = Object.entries(r.by_trigger || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(", ");
@@ -224,6 +308,8 @@ async function pageDashboard() {
   const [{ areas, feats }, statusTxt, rec, one] = await Promise.all([loadRegistry(), gh("status.json").catch(e => { if (String(e.message).startsWith("MISSING|")) return "{}"; throw e; }), loadJson("data/recurring.json", { rules: [] }), loadJson("data/events.json", { events: [] })]);
   const projects = await loadProjects();
   const rep = await loadJson("data/english-report.json", null);
+  const tasksOn = feats.some(f => f.id === "tasks" && f.status === "live");
+  const tasks = tasksOn ? await loadTasks() : [];
   const repOn = feats.some(f => f.id === "english-report" && f.status === "live");
   const trackerOn = feats.some(f => f.id === "project-tracker" && f.status === "live");
   const today = todayWarsaw(), rules = rec.rules || [], events = one.events || [];
@@ -255,16 +341,18 @@ async function pageDashboard() {
       <div class="card"><div class="label">System status</div>${jobs.length ? jobs.map(row).join("") : soon("")}</div>
       <div class="card"><div class="label">Today’s agenda</div>${agendaOn ? `<div class="label" style="margin-bottom:4px">${esc(dayLabel(today, today))}</div>${todayHtml}` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Coming up (next six days)</div>${agendaOn ? weekHtml : soon("Planning area.")}</div>
+      <div class="card"><div class="label">Tasks</div>${tasksOn ? taskRows(tasks, today) + `<p style="margin:10px 0 0"><a href="#/notebook">Notebook</a></p>` : soon("Planning area.")}</div>
       <div class="card"><div class="label">Projects</div>${trackerOn ? (projects.filter(p => p.status === "active").map(p => projectBlock(p, false)).join("") || `<p class="muted" style="margin:0">No active projects.</p>`) + `<p style="margin:10px 0 0"><a href="#/projects">All projects</a></p>` : soon("Projects area.")}</div>
       <div class="card"><div class="label">English report</div>${repOn ? reportHtml(rep) : soon("Study area.")}</div>
     </div>`;
+  wireTasks();
 }
 function pageSettings() {
   const has = !!getToken();
   view.innerHTML = `<div class="label">Settings</div><h1>Access to your data</h1>
     <p class="muted">The page itself is public and holds no personal data. Your data sits in the private repository ${esc(DATA_REPO)} and is read with a token that stays in this browser only.</p>
     <div class="card"><div class="label">GitHub token</div>
-      <p class="muted">Create a fine-grained token on GitHub for the repository ${esc(DATA_REPO)} only, with the Contents permission (read is enough for now), and paste it here.</p>
+      <p class="muted">Create a fine-grained token on GitHub for the repository ${esc(DATA_REPO)} only, with the Contents permission and paste it here. <strong>Read only</strong> is enough to look at everything; the notebook and ticking off tasks need <strong>Read and write</strong>.</p>
       <input type="password" id="tok" placeholder="${has ? "A token is saved. Paste a new one to replace it." : "Paste token"}" autocomplete="off">
       <p style="margin-top:14px"><button id="save">Save and test</button> <button class="sec" id="clear">Remove token</button></p>
       <div id="msg"></div></div>`;
@@ -284,6 +372,7 @@ async function route() {
   try {
     if (parts[0] === "settings") pageSettings();
     else if (parts[0] === "projects") await pageProjects();
+    else if (parts[0] === "notebook") await pageNotebook();
     else if (parts[0] === "manual" && parts[1]) await pageManualArea(parts[1], parts[2]);
     else if (parts[0] === "manual") await pageManualOverview();
     else await pageDashboard();

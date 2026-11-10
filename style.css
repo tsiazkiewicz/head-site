@@ -70,3 +70,5 @@ svg .area text.s { fill: var(--text2); font-size: 12px; font-family: Roboto, sys
 svg .edge { fill: none; stroke: var(--text2); stroke-width: 1.4; }
 svg marker path { fill: var(--text2); }
 svg a { cursor: pointer; }
+textarea { font: inherit; width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--divider); background: var(--surface); color: var(--text); resize: vertical; }
+input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--primary); }
